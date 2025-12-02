@@ -1350,6 +1350,9 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
             t_w = torch.linspace(0, 1, steps=latent_overlap_w, device=x.device, dtype=x.dtype)
             ramp_cache['w'] = 0.5 - 0.5 * torch.cos(t_w * torch.pi)
 
+        # Collect all tiles first
+        tiles_to_process = []
+
         tile_id = 0
         for y_lat in range(0, H_lat_total, stride_h):
             y_lat_end = min(y_lat + latent_tile_h, H_lat_total)
@@ -1381,33 +1384,75 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
 
                 tile_sample = x[:, :, :, y_out:y_out_end, x_out:x_out_end]
 
-                # Log progress periodically instead of every tile (at 1, 6, 11, 16, ...)
-                if self.debug and (tile_id % 5 == 1 or tile_id == num_tiles):
-                    if tile_id == num_tiles:
-                        # Only log final tile if not covered by previous range
-                        if (tile_id - 1) % 5 == 0:
-                            self.debug.log(f"Encoding tile {tile_id} / {num_tiles}", category="vae", indent_level=1)
-                    else:
-                        end_tile = min(tile_id + 4, num_tiles)
-                        self.debug.log(f"Encoding tiles {tile_id}-{end_tile} / {num_tiles}", category="vae", indent_level=1)
+                tiles_to_process.append({
+                    'id': tile_id,
+                    'sample': tile_sample,
+                    'y_lat': y_lat, 'y_lat_end': y_lat_end,
+                    'x_lat': x_lat, 'x_lat_end': x_lat_end
+                })
 
-                encoded_tile = self.slicing_encode(tile_sample)
+        # Group tiles by shape to enable batching
+        shape_groups = {}
+        for tile_info in tiles_to_process:
+            shape = tile_info['sample'].shape # [B, C, F, H, W]
+            if shape not in shape_groups:
+                shape_groups[shape] = []
+            shape_groups[shape].append(tile_info)
 
-                # Initialize output size using first encoded tile
-                if result is None:
-                    b_out, c_out, f_lat, _, _ = encoded_tile.shape
+        # Process each group
+        total_groups = len(shape_groups)
+        processed_groups = 0
+
+        # Determine batch size limit for tile processing
+        # 4 is a safe default for 1080p/4K tiles (512x512) on 16GB VRAM
+        # TODO: Make this configurable in the future
+        TILE_BATCH_SIZE = 4
+
+        for shape, group_tiles in shape_groups.items():
+            processed_groups += 1
+
+            # Process tiles in chunks to avoid OOM
+            for i in range(0, len(group_tiles), TILE_BATCH_SIZE):
+                chunk_tiles = group_tiles[i : i + TILE_BATCH_SIZE]
+
+                # Extract samples and batch them
+                samples = [t['sample'] for t in chunk_tiles]
+                batch_samples = torch.cat(samples, dim=0) # [Batch*NumTiles, C, F, H, W]
+
+                # Log batch processing
+                if self.debug:
+                    start_id = chunk_tiles[0]['id']
+                    end_id = chunk_tiles[-1]['id']
+                    self.debug.log(f"Encoding batch of {len(chunk_tiles)} tiles (IDs {start_id}-{end_id})", category="vae", indent_level=1)
                     
-                    # Accumulate on offload device if specified and different, else on inference device
-                    device = getattr(self, 'tensor_offload_device', None)
-                    if device is None or device == encoded_tile.device:
-                        device = encoded_tile.device
+                # Process batch
+                encoded_batch = self.slicing_encode(batch_samples)
+
+                # Split back to individual tiles
+                batch_size_per_tile = samples[0].shape[0]
+                encoded_tiles_list = encoded_batch.split(batch_size_per_tile, dim=0)
+
+                # Process each encoded tile result
+                for j, encoded_tile in enumerate(encoded_tiles_list):
+                    tile_info = chunk_tiles[j]
+                    y_lat, y_lat_end = tile_info['y_lat'], tile_info['y_lat_end']
+                    x_lat, x_lat_end = tile_info['x_lat'], tile_info['x_lat_end']
                     
-                    result = torch.zeros(
-                        (b_out, c_out, f_lat, H_lat_total, W_lat_total),
-                        device=device,
-                        dtype=encoded_tile.dtype,
-                    )
-                    count = torch.zeros((1, 1, 1, H_lat_total, W_lat_total), device=device, dtype=encoded_tile.dtype)
+                    # Initialize output size using first encoded tile
+                    if result is None:
+                        b_out, c_out, f_lat, _, _ = encoded_tile.shape
+
+                        # Accumulate on offload device if specified and different, else on inference device
+                        device = getattr(self, 'tensor_offload_device', None)
+                        if device is None or device == encoded_tile.device:
+                            device = encoded_tile.device
+
+                        result = torch.zeros(
+                            (b_out, c_out, f_lat, H_lat_total, W_lat_total),
+                            device=device,
+                            dtype=encoded_tile.dtype,
+                        )
+                        count = torch.zeros((1, 1, 1, H_lat_total, W_lat_total), device=device, dtype=encoded_tile.dtype)
 
                 eff_h_lat = min(y_lat_end - y_lat, encoded_tile.shape[3], result.shape[3] - y_lat)
                 eff_w_lat = min(x_lat_end - x_lat, encoded_tile.shape[4], result.shape[4] - x_lat)
@@ -1512,6 +1557,9 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
             t_w = torch.linspace(0, 1, steps=overlap_w, device=z.device, dtype=z.dtype)
             ramp_cache['w'] = 0.5 - 0.5 * torch.cos(t_w * torch.pi)
 
+        # Collect all tiles first
+        tiles_to_process = []
+
         tile_id = 0
         for y_lat in range(0, H, stride_h):
             y_lat_end = min(y_lat + latent_tile_h, H)
@@ -1542,31 +1590,71 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
                 
                 tile_latent = z[:, :, :, y_lat:y_lat_end, x_lat:x_lat_end]
 
-                # Log progress periodically instead of every tile (at 1, 6, 11, 16, ...)
-                if self.debug and (tile_id % 5 == 1 or tile_id == num_tiles):
-                    if tile_id == num_tiles:
-                        # Only log final tile if not covered by previous range
-                        if (tile_id - 1) % 5 == 0:
-                            self.debug.log(f"Decoding tile {tile_id} / {num_tiles}", category="vae", indent_level=1)
-                    else:
-                        end_tile = min(tile_id + 4, num_tiles)
-                        self.debug.log(f"Decoding tiles {tile_id}-{end_tile} / {num_tiles}", category="vae", indent_level=1)
+                tiles_to_process.append({
+                    'id': tile_id,
+                    'latent': tile_latent,
+                    'y_lat': y_lat, 'y_lat_end': y_lat_end,
+                    'x_lat': x_lat, 'x_lat_end': x_lat_end
+                })
 
-                decoded_tile = self.slicing_decode(tile_latent)
+        # Group tiles by shape to enable batching
+        shape_groups = {}
+        for tile_info in tiles_to_process:
+            shape = tile_info['latent'].shape # [B, C, F, H, W]
+            if shape not in shape_groups:
+                shape_groups[shape] = []
+            shape_groups[shape].append(tile_info)
 
-                # Initialize result tensors using actual decoded shapes on first tile
-                if result is None:
-                    b_out, c_out, out_f_tile, _, _ = decoded_tile.shape
-                    output_h = H * scale_factor
-                    output_w = W * scale_factor
+        # Process each group
+        total_groups = len(shape_groups)
+        processed_groups = 0
+
+        # Determine batch size limit for tile processing
+        TILE_BATCH_SIZE = 4
+
+        for shape, group_tiles in shape_groups.items():
+            processed_groups += 1
+
+            # Process tiles in chunks to avoid OOM
+            for i in range(0, len(group_tiles), TILE_BATCH_SIZE):
+                chunk_tiles = group_tiles[i : i + TILE_BATCH_SIZE]
+
+                # Extract latents and batch them
+                latents = [t['latent'] for t in chunk_tiles]
+                batch_latents = torch.cat(latents, dim=0) # [Batch*NumTiles, C, F, H, W]
+
+                # Log batch processing
+                if self.debug:
+                    start_id = chunk_tiles[0]['id']
+                    end_id = chunk_tiles[-1]['id']
+                    self.debug.log(f"Decoding batch of {len(chunk_tiles)} tiles (IDs {start_id}-{end_id})", category="vae", indent_level=1)
                     
-                    # Accumulate on offload device if specified and different, else on inference device
-                    device = getattr(self, 'tensor_offload_device', None)
-                    if device is None or device == decoded_tile.device:
-                        device = decoded_tile.device
-                    
-                    result = torch.zeros((b_out, c_out, out_f_tile, output_h, output_w), device=device, dtype=decoded_tile.dtype)
-                    count = torch.zeros((1, 1, 1, output_h, output_w), device=device, dtype=decoded_tile.dtype)
+                # Process batch
+                decoded_batch = self.slicing_decode(batch_latents)
+
+                # Split back to individual tiles
+                batch_size_per_tile = latents[0].shape[0]
+                decoded_tiles_list = decoded_batch.split(batch_size_per_tile, dim=0)
+
+                # Process each decoded tile result
+                for j, decoded_tile in enumerate(decoded_tiles_list):
+                    tile_info = chunk_tiles[j]
+                    y_lat, y_lat_end = tile_info['y_lat'], tile_info['y_lat_end']
+                    x_lat, x_lat_end = tile_info['x_lat'], tile_info['x_lat_end']
+
+                    # Initialize result tensors using actual decoded shapes on first tile
+                    if result is None:
+                        b_out, c_out, out_f_tile, _, _ = decoded_tile.shape
+                        output_h = H * scale_factor
+                        output_w = W * scale_factor
+
+                        # Accumulate on offload device if specified and different, else on inference device
+                        device = getattr(self, 'tensor_offload_device', None)
+                        if device is None or device == decoded_tile.device:
+                            device = decoded_tile.device
+
+                        result = torch.zeros((b_out, c_out, out_f_tile, output_h, output_w), device=device, dtype=decoded_tile.dtype)
+                        count = torch.zeros((1, 1, 1, output_h, output_w), device=device, dtype=decoded_tile.dtype)
 
                 # Corresponding output-space placement
                 y_out, y_out_end = y_lat * scale_factor, y_lat_end * scale_factor
