@@ -13,6 +13,7 @@ from ..models.dit_3b.nadit import NaDiT as NaDiT3B
 from ..models.dit_7b.nadit import NaDiT as NaDiT7B
 from ..models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
 from ..models.video_vae_v3.modules.light_vae import LightVAEWrapper
+from ..models.video_vae_v3.modules.vae_tiny import WanVAE_tiny
 
 # Model classes - simple registry with clear keys
 MODEL_CLASSES = {
@@ -20,6 +21,7 @@ MODEL_CLASSES = {
     "dit_7b.nadit": NaDiT7B,
     "video_vae_v3.modules.attn_video_vae": VideoAutoencoderKLWrapper,
     "video_vae_v3.modules.light_vae": LightVAEWrapper,
+    "video_vae_v3.modules.vae_tiny": WanVAE_tiny,
 }
 
 @dataclass
@@ -59,6 +61,9 @@ MODEL_REGISTRY = {
     # LightVAE
     "lightvaew2_1.pth": ModelInfo(category="vae", precision="bf16", repo="lightx2v/Autoencoders", wrapper_class="video_vae_v3.modules.light_vae", pruning_rate=0.75),
     "lightvaew2_1.safetensors": ModelInfo(category="vae", precision="bf16", repo="lightx2v/Autoencoders", wrapper_class="video_vae_v3.modules.light_vae", pruning_rate=0.75),
+
+    # Tiny VAE (TAEHV / WanVAE_tiny)
+    "taew2_1.pth": ModelInfo(category="vae", precision="bf16", repo="lightx2v/Autoencoders", wrapper_class="video_vae_v3.modules.vae_tiny"),
 }
 
 # Configuration constants
