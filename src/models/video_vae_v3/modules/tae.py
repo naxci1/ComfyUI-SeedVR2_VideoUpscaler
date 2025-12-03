@@ -225,7 +225,8 @@ class TAEHV(nn.Module):
                     print(f"Warning: Checkpoint {checkpoint_path} not found, initializing random weights")
                     return
 
-            self.load_state_dict(self.patch_tgrow_layers(state_dict))
+            # Use assign=True to ensure weights are loaded even if model is on meta device
+            self.load_state_dict(self.patch_tgrow_layers(state_dict), assign=True)
 
     def patch_tgrow_layers(self, sd):
         """Patch TGrow layers to use a smaller kernel if needed.
