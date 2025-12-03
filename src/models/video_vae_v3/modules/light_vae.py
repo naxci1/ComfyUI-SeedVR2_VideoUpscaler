@@ -784,14 +784,35 @@ class LightVAEWrapper(nn.Module):
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
 
         # Manually verify and cast all model parameters to avoid dtype/device mismatch
-        # We iterate safely, skipping meta tensors but casting others (e.g. Float32->BFloat16)
-        # This handles cases where 'load_state_dict' left some params as Float32 but input is BFloat16
-        for param in self.parameters():
-            if param.device.type != 'meta' and (param.device != x.device or param.dtype != x.dtype):
+        # We handle both meta tensors (missing from checkpoint) and mismatched dtypes (Float32 vs BF16)
+        for name, param in self.named_parameters():
+            target_device = x.device
+            target_dtype = x.dtype
+
+            if param.device.type == 'meta':
+                # Materialize meta parameter
+                # Create new tensor on target device/dtype
+                new_param = torch.empty(param.shape, device=target_device, dtype=target_dtype)
+                if 'bias' in name:
+                    nn.init.zeros_(new_param)
+                elif 'weight' in name:
+                    # Basic init for weights if missing (better than empty/NaN)
+                    if len(param.shape) >= 2:
+                        nn.init.kaiming_normal_(new_param)
+                    else:
+                        nn.init.normal_(new_param)
+                else:
+                    nn.init.zeros_(new_param)
+
+                # Assign new data to parameter
+                param.data = new_param
+
+            elif param.device != target_device or param.dtype != target_dtype:
+                # Cast existing parameter
                 if param.is_leaf:
-                    param.data = param.data.to(device=x.device, dtype=x.dtype)
+                    param.data = param.data.to(device=target_device, dtype=target_dtype)
                     if param.grad is not None:
-                        param.grad.data = param.grad.data.to(device=x.device, dtype=x.dtype)
+                        param.grad.data = param.grad.data.to(device=target_device, dtype=target_dtype)
 
         if tiled:
             # Update tile settings if provided
@@ -832,12 +853,30 @@ class LightVAEWrapper(nn.Module):
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
 
         # Manually verify and cast all model parameters to avoid dtype/device mismatch
-        for param in self.parameters():
-            if param.device.type != 'meta' and (param.device != z.device or param.dtype != z.dtype):
+        for name, param in self.named_parameters():
+            target_device = z.device
+            target_dtype = z.dtype
+
+            if param.device.type == 'meta':
+                # Materialize meta parameter
+                new_param = torch.empty(param.shape, device=target_device, dtype=target_dtype)
+                if 'bias' in name:
+                    nn.init.zeros_(new_param)
+                elif 'weight' in name:
+                    if len(param.shape) >= 2:
+                        nn.init.kaiming_normal_(new_param)
+                    else:
+                        nn.init.normal_(new_param)
+                else:
+                    nn.init.zeros_(new_param)
+                param.data = new_param
+
+            elif param.device != target_device or param.dtype != target_dtype:
+                # Cast existing parameter
                 if param.is_leaf:
-                    param.data = param.data.to(device=z.device, dtype=z.dtype)
+                    param.data = param.data.to(device=target_device, dtype=target_dtype)
                     if param.grad is not None:
-                        param.grad.data = param.grad.data.to(device=z.device, dtype=z.dtype)
+                        param.grad.data = param.grad.data.to(device=target_device, dtype=target_dtype)
 
         if tiled:
             self.model.tile_sample_min_height = tile_size[0]
