@@ -51,10 +51,7 @@ class RMS_norm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x):
-        out = F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.weight
-        if isinstance(self.bias, torch.Tensor) or self.bias != 0:
-            out = out + self.bias
-        return out
+        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
 
 
 class Upsample(nn.Upsample):
@@ -786,13 +783,19 @@ class LightVAEWrapper(nn.Module):
         if self.scale.device.type == 'meta':
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
 
-        # Ensure model and buffers are on the correct device and dtype
-        # We check parameters to avoid triggering the meta error on other meta-buffers if any exist
+        # Safe cast: check if we need to move the model
         if self.device != x.device or self.dtype != x.dtype:
-            # Check if any parameter is on meta, if so, we can't blindly call .to()
-            param = next(self.model.parameters(), None)
-            if param is not None and param.device.type != 'meta':
-                 self.to(device=x.device, dtype=x.dtype)
+            # We can't use self.to() blindly if *any* parameter is on meta
+            # But we must convert non-meta parameters to the correct dtype (e.g. Float32 -> BFloat16)
+            # This manual loop ensures we convert what we can, avoiding "meta tensor" errors
+            for param in self.parameters():
+                if param.device.type != 'meta' and (param.device != x.device or param.dtype != x.dtype):
+                    if param.is_leaf:
+                        # For leaf parameters, we can't change data directly if it requires grad (but here inference)
+                        # We use .data to overwrite
+                        param.data = param.data.to(device=x.device, dtype=x.dtype)
+                        if param.grad is not None:
+                            param.grad.data = param.grad.data.to(device=x.device, dtype=x.dtype)
 
         if tiled:
             # Update tile settings if provided
@@ -832,12 +835,16 @@ class LightVAEWrapper(nn.Module):
         if self.scale.device.type == 'meta':
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
 
-        # Ensure model and buffers are on the correct device and dtype
+        # Safe cast: check if we need to move the model
         if self.device != z.device or self.dtype != z.dtype:
-            # Check if any parameter is on meta, if so, we can't blindly call .to()
-            param = next(self.model.parameters(), None)
-            if param is not None and param.device.type != 'meta':
-                self.to(device=z.device, dtype=z.dtype)
+            # We can't use self.to() blindly if *any* parameter is on meta
+            # But we must convert non-meta parameters to the correct dtype (e.g. Float32 -> BFloat16)
+            for param in self.parameters():
+                if param.device.type != 'meta' and (param.device != z.device or param.dtype != z.dtype):
+                    if param.is_leaf:
+                        param.data = param.data.to(device=z.device, dtype=z.dtype)
+                        if param.grad is not None:
+                            param.grad.data = param.grad.data.to(device=z.device, dtype=z.dtype)
 
         if tiled:
             self.model.tile_sample_min_height = tile_size[0]
