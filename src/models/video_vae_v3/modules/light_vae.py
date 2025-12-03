@@ -47,7 +47,7 @@ class RMS_norm(nn.Module):
 
         self.channel_first = channel_first
         self.scale = dim**0.5
-        self.weight = nn.Parameter(torch.ones(shape))
+        self.gamma = nn.Parameter(torch.ones(shape))
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x):
@@ -780,9 +780,19 @@ class LightVAEWrapper(nn.Module):
         # x input: [B, C, T, H, W]
         # model expects [B, C, T, H, W]
 
+        # Ensure shift/scale are materialized if on meta device
+        if self.shift.device.type == 'meta':
+             self.shift = torch.tensor(self.mean).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
+        if self.scale.device.type == 'meta':
+             self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
+
         # Ensure model and buffers are on the correct device and dtype
+        # We check parameters to avoid triggering the meta error on other meta-buffers if any exist
         if self.device != x.device or self.dtype != x.dtype:
-            self.to(device=x.device, dtype=x.dtype)
+            # Check if any parameter is on meta, if so, we can't blindly call .to()
+            param = next(self.model.parameters(), None)
+            if param is not None and param.device.type != 'meta':
+                 self.to(device=x.device, dtype=x.dtype)
 
         if tiled:
             # Update tile settings if provided
@@ -816,9 +826,18 @@ class LightVAEWrapper(nn.Module):
     def decode(self, z: torch.Tensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> Union[DecoderOutput, torch.Tensor]:
 
+        # Ensure shift/scale are materialized if on meta device
+        if self.shift.device.type == 'meta':
+             self.shift = torch.tensor(self.mean).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
+        if self.scale.device.type == 'meta':
+             self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
+
         # Ensure model and buffers are on the correct device and dtype
         if self.device != z.device or self.dtype != z.dtype:
-            self.to(device=z.device, dtype=z.dtype)
+            # Check if any parameter is on meta, if so, we can't blindly call .to()
+            param = next(self.model.parameters(), None)
+            if param is not None and param.device.type != 'meta':
+                self.to(device=z.device, dtype=z.dtype)
 
         if tiled:
             self.model.tile_sample_min_height = tile_size[0]
