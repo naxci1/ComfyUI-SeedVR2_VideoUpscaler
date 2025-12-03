@@ -56,10 +56,10 @@ class WanVAE_tiny(nn.Module):
         latents = latents.to(self.dtype)
 
         if self.need_scaled:
-            # Ensure buffers are on correct device
-            if self.shift.device != latents.device:
-                self.shift = self.shift.to(latents.device).to(latents.dtype)
-                self.scale = self.scale.to(latents.device).to(latents.dtype)
+            # Ensure buffers are on correct device and dtype
+            if self.shift.device != latents.device or self.shift.dtype != latents.dtype:
+                self.shift = self.shift.to(device=latents.device, dtype=latents.dtype)
+                self.scale = self.scale.to(device=latents.device, dtype=latents.dtype)
 
             latents = latents * self.scale + self.shift
 
@@ -95,9 +95,9 @@ class WanVAE_tiny(nn.Module):
         encoded = encoded.transpose(1, 2)
 
         if self.need_scaled:
-            if self.shift.device != encoded.device:
-                self.shift = self.shift.to(encoded.device).to(encoded.dtype)
-                self.scale = self.scale.to(encoded.device).to(encoded.dtype)
+            if self.shift.device != encoded.device or self.shift.dtype != encoded.dtype:
+                self.shift = self.shift.to(device=encoded.device, dtype=encoded.dtype)
+                self.scale = self.scale.to(device=encoded.device, dtype=encoded.dtype)
 
             encoded = (encoded - self.shift) * self.scale
 
