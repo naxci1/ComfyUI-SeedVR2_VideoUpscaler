@@ -38,7 +38,7 @@ class WanVAE_tiny(nn.Module):
             self.register_buffer('scale', 1.0 / torch.tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1))
 
     @torch.no_grad()
-    def decode(self, latents, return_dict=False):
+    def decode(self, latents, return_dict=False, tiled=False, **kwargs):
         # SeedVR2 interface: encode/decode take/return tensors or objects
         # latents: [B, C, T, H, W]
 
@@ -123,7 +123,7 @@ class WanVAE_tiny(nn.Module):
         return decoded
 
     @torch.no_grad()
-    def encode(self, x, return_dict=False):
+    def encode(self, x, return_dict=False, tiled=False, **kwargs):
         # x: [B, C, T, H, W] (video frames)
         x = x.to(self.dtype)
 
