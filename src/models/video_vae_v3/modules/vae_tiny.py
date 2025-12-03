@@ -37,8 +37,18 @@ class WanVAE_tiny(nn.Module):
             self.register_buffer('shift', torch.tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1))
             self.register_buffer('scale', 1.0 / torch.tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1))
 
+    class TinyVAEOutput:
+        def __init__(self, output):
+            self.latent = output
+            self.sample = output # For decode
+            # For posterior.mode()
+            self.posterior = self
+
+        def mode(self):
+            return self.latent
+
     @torch.no_grad()
-    def decode(self, latents, return_dict=False, tiled=False, **kwargs):
+    def decode(self, latents, return_dict=True, tiled=False, **kwargs):
         # SeedVR2 interface: encode/decode take/return tensors or objects
         # latents: [B, C, T, H, W]
 
@@ -46,14 +56,6 @@ class WanVAE_tiny(nn.Module):
         latents = latents.to(self.dtype)
 
         if self.need_scaled:
-            # Apply scaling (denormalization for decoding)
-            # z = (z - mean) * scale_inv  <-- wait, standard VAE is: z = (x - mean) * scale_inv
-            # decode: x = z / scale_inv + mean = z * scale + mean
-
-            # FlashVSR code: latents = latents / latents_std + latents_mean
-            # My buffer 'scale' is 1.0 / latents_std
-            # So: latents = latents * self.scale + self.shift
-
             # Ensure buffers are on correct device
             if self.shift.device != latents.device:
                 self.shift = self.shift.to(latents.device).to(latents.dtype)
@@ -62,78 +64,26 @@ class WanVAE_tiny(nn.Module):
             latents = latents * self.scale + self.shift
 
         # Decode
-        # Transpose input to [B, C, T, H, W] -> internally TAEHV expects NTCHW?
-        # TAEHV.decode_video expects NTCHW RGB (C=3)
-        # Wait, decode_video input args: x: input NTCHW latent (C=12)
-        # But Wan2.1 has 16 channels. TAEHV init set latent_channels=16.
-
-        # FlashVSR VAE_tiny decode:
-        # return self.taehv.decode_video(latents.transpose(1, 2).to(self.dtype), parallel=False).transpose(1, 2).mul_(2).sub_(1)
-
-        # Note: SeedVR2 likely works with [B, C, T, H, W].
-        # If TAEHV expects [N, C, T, H, W], it's the same.
-        # But FlashVSR does transpose(1, 2)?
-        # Latents shape [B, C, T, H, W]
-        # Transpose(1, 2) -> [B, T, C, H, W] ?
-        # Let's check TAEHV.decode_video again.
-        # "TAESDV operates on NTCHW tensors"
-        # N=Batch, T=Time.
-        # If input is [B, C, T, H, W], we need [B, T, C, H, W]?
-        # FlashVSR: latents.transpose(1, 2) -> swaps C and T.
-        # So input to decode_video is [B, T, C, H, W].
-
-        # My TAEHV implementation:
-        # def decode_video(self, x, parallel=True, show_progress_bar=True):
-        #    N, T, C, H, W = x.shape
-        # So yes, it expects [N, T, C, H, W].
-
-        # So we must transpose.
-
+        # TAEHV expects NTCHW. Transpose BCTHW -> BTCHW
+        # FlashVSR approach: transpose(1, 2) -> B, T, C, H, W
         decoded = self.taehv.decode_video(latents.transpose(1, 2), parallel=False, show_progress_bar=False)
 
         # Output is [N, T, C, H, W]. Transpose back to [N, C, T, H, W]
         decoded = decoded.transpose(1, 2)
 
-        # FlashVSR does .mul_(2).sub_(1) -> [0, 1] to [-1, 1]
-        # SeedVR2 usually expects decoded images in [0, 1] (or whatever the pipeline expects).
-        # Standard VAE decode usually returns [-1, 1] or [0, 1].
-        # SeedVR2 LightVAE decode returns [0, 1].
-        # LightVAE: y = y.mul_(0.5).add_(0.5).clamp_(0, 1)  (if original was [-1, 1])
-        # TAEHV output is [0, 1] (sigmoid/clamp at end).
-        # FlashVSR converts it to [-1, 1].
-        # I should check what SeedVR2 expects.
-        # LightVAE code:
-        # def decode_video(self, x, scale=[0, 1]):
-        #    y = self.decode(y, scale).clamp_(-1, 1)
-        #    y = y.mul_(0.5).add_(0.5).clamp_(0, 1)
-        # So LightVAE.decode returns [-1, 1].
-
-        # If I want to match LightVAE interface, I should probably return [-1, 1].
-        # Then the pipeline converts it.
-        # BUT, if I am wrapping it, maybe I should return what `decode` returns.
-
-        # FlashVSR returns: mul(2).sub(1) -> 0*2-1=-1, 1*2-1=1. So [-1, 1].
-
+        # FlashVSR returns [-1, 1] range
         decoded = decoded.mul(2).sub(1)
 
         if return_dict:
-             # Mimic diffusers DecoderOutput
-             from diffusers.models.modeling_outputs import DecoderOutput
-             return DecoderOutput(sample=decoded)
+             return self.TinyVAEOutput(decoded)
         return decoded
 
     @torch.no_grad()
-    def encode(self, x, return_dict=False, tiled=False, **kwargs):
+    def encode(self, x, return_dict=True, tiled=False, **kwargs):
         # x: [B, C, T, H, W] (video frames)
         x = x.to(self.dtype)
 
-        # Check input range. SeedVR2 usually passes [-1, 1] or [0, 1]?
-        # LightVAE encode: y = x.mul(2).sub_(1) -> assumes x is [0, 1] and converts to [-1, 1]?
-        # Wait, LightVAE.encode_video does that. LightVAE.encode expects normalized?
-        # Let's assume input x is in [-1, 1].
-        # TAEHV expects [0, 1].
-        # So x = x * 0.5 + 0.5
-
+        # Input assumed to be [-1, 1]. TAEHV expects [0, 1].
         x_in = x * 0.5 + 0.5
 
         # Transpose to [B, T, C, H, W]
@@ -145,10 +95,6 @@ class WanVAE_tiny(nn.Module):
         encoded = encoded.transpose(1, 2)
 
         if self.need_scaled:
-            # z = (z - mean) * scale_inv
-            # self.scale is 1/std (scale_inv)
-            # encoded = (encoded - shift) * scale
-
             if self.shift.device != encoded.device:
                 self.shift = self.shift.to(encoded.device).to(encoded.dtype)
                 self.scale = self.scale.to(encoded.device).to(encoded.dtype)
@@ -156,14 +102,7 @@ class WanVAE_tiny(nn.Module):
             encoded = (encoded - self.shift) * self.scale
 
         if return_dict:
-             # Mimic diffusers AutoencoderKLOutput
-             # But we return a distribution-like object
-             from diffusers.models.modeling_outputs import AutoencoderKLOutput
-             class PseudoDist:
-                def __init__(self, val): self.val = val
-                def sample(self): return self.val
-                def mode(self): return self.val
-             return AutoencoderKLOutput(latent_dist=PseudoDist(encoded))
+             return self.TinyVAEOutput(encoded)
 
         return encoded
 
