@@ -31,7 +31,8 @@ class TPool(nn.Module):
     def __init__(self, n_in, stride):
         super().__init__()
         self.stride = stride
-        self.conv = nn.Sequential(conv(n_in * stride, n_in), nn.ReLU(), conv(n_in, n_in), nn.ReLU(), conv(n_in, n_in))
+        # Simplified to match taew2_1.pth checkpoint structure (single conv instead of Sequential)
+        self.conv = conv(n_in * stride, n_in)
         self.skip = nn.Conv2d(n_in * stride, n_in, 1, bias=False)
         self.act = nn.ReLU()
     def forward(self, x):
@@ -41,7 +42,8 @@ class TGrow(nn.Module):
     def __init__(self, n_in, stride):
         super().__init__()
         self.stride = stride
-        self.conv = nn.Sequential(conv(n_in, n_in * stride), nn.ReLU(), conv(n_in * stride, n_in * stride), nn.ReLU(), conv(n_in * stride, n_in * stride))
+        # Simplified to match taew2_1.pth checkpoint structure (single conv instead of Sequential)
+        self.conv = conv(n_in, n_in * stride)
         self.skip = nn.Conv2d(n_in, n_in * stride, 1, bias=False)
         self.act = nn.ReLU()
     def forward(self, x):
