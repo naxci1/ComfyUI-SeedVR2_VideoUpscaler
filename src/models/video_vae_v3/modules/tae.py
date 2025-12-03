@@ -31,23 +31,25 @@ class TPool(nn.Module):
     def __init__(self, n_in, stride):
         super().__init__()
         self.stride = stride
-        # Simplified to match taew2_1.pth checkpoint structure (single conv instead of Sequential)
-        self.conv = conv(n_in * stride, n_in)
-        self.skip = nn.Conv2d(n_in * stride, n_in, 1, bias=False)
+        # Simplified for taew2_1.pth: 1x1 conv, no bias, no skip
+        # Note: conv() helper applies padding=1, but 1x1 conv needs padding=0.
+        # So we use nn.Conv2d directly.
+        self.conv = nn.Conv2d(n_in * stride, n_in, 1, padding=0, bias=False)
         self.act = nn.ReLU()
     def forward(self, x):
-        return self.act(self.conv(x) + self.skip(x))
+        # Skip connection is not present in taew2_1.pth TPool layers
+        return self.act(self.conv(x))
 
 class TGrow(nn.Module):
     def __init__(self, n_in, stride):
         super().__init__()
         self.stride = stride
-        # Simplified to match taew2_1.pth checkpoint structure (single conv instead of Sequential)
-        self.conv = conv(n_in, n_in * stride)
-        self.skip = nn.Conv2d(n_in, n_in * stride, 1, bias=False)
+        # Simplified for taew2_1.pth: 1x1 conv, no bias, no skip
+        self.conv = nn.Conv2d(n_in, n_in * stride, 1, padding=0, bias=False)
         self.act = nn.ReLU()
     def forward(self, x):
-        return self.act(self.conv(x) + self.skip(x))
+        # Skip connection is not present in taew2_1.pth TGrow layers
+        return self.act(self.conv(x))
 
 def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
     N, T, C, H, W = x.shape
