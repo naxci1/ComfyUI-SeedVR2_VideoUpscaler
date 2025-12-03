@@ -7,7 +7,7 @@ class WanVAE_tiny(nn.Module):
     """
     Wrapper for Tiny AutoEncoder (TAEHV) configured for Wan2.1.
     """
-    def __init__(self, vae_path="taew2_1.pth", dtype=torch.bfloat16, device="cuda", need_scaled=True):
+    def __init__(self, vae_path="taew2_1.pth", dtype=torch.bfloat16, device="cuda", need_scaled=True, **kwargs):
         super().__init__()
         self.dtype = dtype
         self.device = torch.device(device) if isinstance(device, str) else device
