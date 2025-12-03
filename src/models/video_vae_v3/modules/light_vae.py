@@ -729,12 +729,23 @@ class WanVAE_(nn.Module):
         return y.transpose(1, 2).to(x)
 
 
-class LightVAEWrapper(nn.Module):
+class LightVAEWrapper(WanVAE_):
     """
-    Wrapper for LightVAE to match the interface expected by SeedVR2
+    Wrapper for LightVAE to match the interface expected by SeedVR2.
+    Inherits from WanVAE_ to ensure state dict keys match standard checkpoints (without 'model.' prefix).
     """
     def __init__(self, pruning_rate=0.75, **kwargs):
-        super().__init__()
+        # Initialize WanVAE_ directly
+        super().__init__(
+            dim=96,
+            z_dim=16,
+            dim_mult=[1, 2, 4, 4],
+            num_res_blocks=2,
+            attn_scales=[],
+            temperal_downsample=[False, True, True],
+            dropout=0.0,
+            pruning_rate=pruning_rate
+        )
 
         # Hardcoded params for Wan2.1 LightVAE from the repo
         self.mean = [
@@ -745,17 +756,6 @@ class LightVAEWrapper(nn.Module):
             2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
             3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160
         ]
-
-        self.model = WanVAE_(
-            dim=96,
-            z_dim=16,
-            dim_mult=[1, 2, 4, 4],
-            num_res_blocks=2,
-            attn_scales=[],
-            temperal_downsample=[False, True, True],
-            dropout=0.0,
-            pruning_rate=pruning_rate
-        )
 
         self.register_buffer('shift', torch.tensor(self.mean).view(1, 16, 1, 1, 1))
         self.register_buffer('scale', 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1))
@@ -802,9 +802,6 @@ class LightVAEWrapper(nn.Module):
     def encode(self, x: torch.FloatTensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> CausalEncoderOutput:
 
-        # x input: [B, C, T, H, W]
-        # model expects [B, C, T, H, W]
-
         # Ensure shift/scale are materialized if on meta device OR if they are on wrong device (e.g. CPU vs CUDA)
         if self.shift.device.type == 'meta' or self.shift.device != x.device or self.shift.dtype != x.dtype:
              self.shift = torch.tensor(self.mean).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
@@ -825,14 +822,14 @@ class LightVAEWrapper(nn.Module):
         if tiled:
             # Update tile settings if provided
             # LightVAE uses these internal attributes for tiling
-            self.model.tile_sample_min_height = tile_size[0]
-            self.model.tile_sample_min_width = tile_size[1]
-            self.model.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
-            self.model.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
+            self.tile_sample_min_height = tile_size[0]
+            self.tile_sample_min_width = tile_size[1]
+            self.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
+            self.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
 
-            z = self.model.tiled_encode(x, [self.shift, self.scale])
+            z = self.tiled_encode(x, [self.shift, self.scale])
         else:
-            z = self.model.encode(x, [self.shift, self.scale])
+            z = super().encode(x, [self.shift, self.scale])
 
         # LightVAE encode returns the mean directly, no sampling in this path usually unless reparameterize is called
         # The original code's encode returns mu.
@@ -872,14 +869,14 @@ class LightVAEWrapper(nn.Module):
                         param.grad.data = param.grad.data.to(device=z.device, dtype=z.dtype)
 
         if tiled:
-            self.model.tile_sample_min_height = tile_size[0]
-            self.model.tile_sample_min_width = tile_size[1]
-            self.model.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
-            self.model.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
+            self.tile_sample_min_height = tile_size[0]
+            self.tile_sample_min_width = tile_size[1]
+            self.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
+            self.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
 
-            dec = self.model.tiled_decode(z, [self.shift, self.scale])
+            dec = self.tiled_decode(z, [self.shift, self.scale])
         else:
-            dec = self.model.decode(z, [self.shift, self.scale])
+            dec = super().decode(z, [self.shift, self.scale])
 
         if not return_dict:
             return (dec,)
