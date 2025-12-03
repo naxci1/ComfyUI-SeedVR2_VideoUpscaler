@@ -51,7 +51,10 @@ class RMS_norm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x):
-        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
+        out = F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.weight
+        if isinstance(self.bias, torch.Tensor) or self.bias != 0:
+            out = out + self.bias
+        return out
 
 
 class Upsample(nn.Upsample):
@@ -771,44 +774,16 @@ class LightVAEWrapper(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def _materialize_meta_tensors(self, module, device, dtype):
-        # Recursively materialize parameters and buffers that are still on meta device
-        for name, child in module.named_children():
-            self._materialize_meta_tensors(child, device, dtype)
-
-        # Handle parameters
-        for name, param in list(module.named_parameters(recurse=False)):
-            if param.device.type == 'meta':
-                new_data = torch.empty(param.shape, device=device, dtype=dtype)
-                if 'bias' in name:
-                    nn.init.zeros_(new_data)
-                elif 'weight' in name:
-                    if len(param.shape) >= 2:
-                        nn.init.kaiming_normal_(new_data)
-                    else:
-                        nn.init.normal_(new_data)
-                else:
-                    nn.init.zeros_(new_data)
-
-                # Replace the parameter on the module
-                setattr(module, name, nn.Parameter(new_data))
-
-        # Handle buffers
-        for name, buf in list(module.named_buffers(recurse=False)):
-            if buf.device.type == 'meta':
-                new_data = torch.zeros(buf.shape, device=device, dtype=dtype)
-                setattr(module, name, new_data)
-
     def encode(self, x: torch.FloatTensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> CausalEncoderOutput:
 
         # x input: [B, C, T, H, W]
         # model expects [B, C, T, H, W]
 
-        # Ensure shift/scale are materialized if on meta device
-        if self.shift.device.type == 'meta':
+        # Ensure shift/scale are materialized if on meta device OR if they are on wrong device (e.g. CPU vs CUDA)
+        if self.shift.device.type == 'meta' or self.shift.device != x.device or self.shift.dtype != x.dtype:
              self.shift = torch.tensor(self.mean).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
-        if self.scale.device.type == 'meta':
+        if self.scale.device.type == 'meta' or self.scale.device != x.device or self.scale.dtype != x.dtype:
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=x.device, dtype=x.dtype)
 
         # Materialize any remaining meta tensors
@@ -854,10 +829,10 @@ class LightVAEWrapper(nn.Module):
     def decode(self, z: torch.Tensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> Union[DecoderOutput, torch.Tensor]:
 
-        # Ensure shift/scale are materialized if on meta device
-        if self.shift.device.type == 'meta':
+        # Ensure shift/scale are materialized if on meta device OR if they are on wrong device (e.g. CPU vs CUDA)
+        if self.shift.device.type == 'meta' or self.shift.device != z.device or self.shift.dtype != z.dtype:
              self.shift = torch.tensor(self.mean).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
-        if self.scale.device.type == 'meta':
+        if self.scale.device.type == 'meta' or self.scale.device != z.device or self.scale.dtype != z.dtype:
              self.scale = 1.0 / torch.tensor(self.std).view(1, 16, 1, 1, 1).to(device=z.device, dtype=z.dtype)
 
         # Materialize any remaining meta tensors
