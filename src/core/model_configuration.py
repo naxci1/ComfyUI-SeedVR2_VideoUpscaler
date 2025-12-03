@@ -1124,7 +1124,13 @@ def _setup_vae_model(
 
         # Set wrapper class if specified
         if vae_info.wrapper_class:
-            vae_config.class_path = vae_info.wrapper_class
+            # Update the object instantiation path
+            if hasattr(vae_config, "__object__"):
+                vae_config.__object__.path = vae_info.wrapper_class
+            else:
+                # Fallback or ensure structure exists
+                vae_config.__object__ = {"path": vae_info.wrapper_class, "args": "as_params"}
+
             debug.log(f"Using VAE wrapper class: {vae_info.wrapper_class}", category="vae")
 
         runner.config.vae.model = OmegaConf.merge(runner.config.vae.model, vae_config)
