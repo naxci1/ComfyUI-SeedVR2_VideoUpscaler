@@ -1136,6 +1136,11 @@ def _setup_vae_model(
         runner._vae_dtype_override = compute_dtype
         
         vae_checkpoint_path = find_model_file(vae_model, base_cache_dir)
+
+        # Inject resolved path into config for VAEs that load weights in __init__ (like WanVAE_tiny)
+        if vae_info.wrapper_class == "video_vae_v3.modules.vae_tiny":
+            runner.config.vae.model.vae_path = vae_checkpoint_path
+
         runner = prepare_model_structure(runner, "vae", vae_checkpoint_path, 
                                         runner.config, debug, None)
         
