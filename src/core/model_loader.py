@@ -837,6 +837,30 @@ def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
     debug.start_timer(f"{model_type_lower}_state_apply")
+
+    # Prefix handling: Check if checkpoint has 'model.' prefix but target model doesn't expect it
+    # This handles the case where checkpoint is saved from a wrapper class (like WanVAE)
+    # but we are loading into the inner model (WanVAE_)
+
+    # Sample a few keys to detect prefix
+    sample_keys = list(state.keys())[:5]
+    has_model_prefix = all(k.startswith('model.') for k in sample_keys) if sample_keys else False
+
+    if has_model_prefix:
+        # Check if model expects 'model.' prefix (by checking named_parameters)
+        model_sample_keys = [k for k, _ in list(model.named_parameters())[:5]]
+        model_expects_prefix = all(k.startswith('model.') for k in model_sample_keys) if model_sample_keys else False
+
+        if not model_expects_prefix:
+            if debug:
+                debug.log(f"Detected 'model.' prefix in checkpoint but not in model. Stripping prefix...",
+                         category=model_type_lower)
+            # Create new state dict with stripped prefix
+            new_state = {k[6:]: v for k, v in state.items() if k.startswith('model.')}
+            # Keep non-prefixed keys just in case? Usually mixing is rare.
+            # Let's stick to safe prefix stripping.
+            state = new_state
+
     model.load_state_dict(state, strict=False, assign=True)
     
     action = "materialized" if used_meta else "applied"
