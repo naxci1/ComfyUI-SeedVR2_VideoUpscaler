@@ -51,7 +51,10 @@ class RMS_norm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x):
-        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.weight + self.bias
+        out = F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.weight
+        if isinstance(self.bias, torch.Tensor) or self.bias != 0:
+            out = out + self.bias
+        return out
 
 
 class Upsample(nn.Upsample):
@@ -777,9 +780,9 @@ class LightVAEWrapper(nn.Module):
         # x input: [B, C, T, H, W]
         # model expects [B, C, T, H, W]
 
-        # Ensure shift/scale are on the correct device
-        shift = self.shift.to(x.device, dtype=x.dtype)
-        scale = self.scale.to(x.device, dtype=x.dtype)
+        # Ensure model and buffers are on the correct device and dtype
+        if self.device != x.device or self.dtype != x.dtype:
+            self.to(device=x.device, dtype=x.dtype)
 
         if tiled:
             # Update tile settings if provided
@@ -789,9 +792,9 @@ class LightVAEWrapper(nn.Module):
             self.model.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
             self.model.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
 
-            z = self.model.tiled_encode(x, [shift, scale])
+            z = self.model.tiled_encode(x, [self.shift, self.scale])
         else:
-            z = self.model.encode(x, [shift, scale])
+            z = self.model.encode(x, [self.shift, self.scale])
 
         # LightVAE encode returns the mean directly, no sampling in this path usually unless reparameterize is called
         # The original code's encode returns mu.
@@ -813,9 +816,9 @@ class LightVAEWrapper(nn.Module):
     def decode(self, z: torch.Tensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> Union[DecoderOutput, torch.Tensor]:
 
-        # Ensure shift/scale are on the correct device
-        shift = self.shift.to(z.device, dtype=z.dtype)
-        scale = self.scale.to(z.device, dtype=z.dtype)
+        # Ensure model and buffers are on the correct device and dtype
+        if self.device != z.device or self.dtype != z.dtype:
+            self.to(device=z.device, dtype=z.dtype)
 
         if tiled:
             self.model.tile_sample_min_height = tile_size[0]
@@ -823,9 +826,9 @@ class LightVAEWrapper(nn.Module):
             self.model.tile_sample_stride_height = tile_size[0] - tile_overlap[0]
             self.model.tile_sample_stride_width = tile_size[1] - tile_overlap[1]
 
-            dec = self.model.tiled_decode(z, [shift, scale])
+            dec = self.model.tiled_decode(z, [self.shift, self.scale])
         else:
-            dec = self.model.decode(z, [shift, scale])
+            dec = self.model.decode(z, [self.shift, self.scale])
 
         if not return_dict:
             return (dec,)
