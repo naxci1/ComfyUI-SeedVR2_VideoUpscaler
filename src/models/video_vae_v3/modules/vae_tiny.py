@@ -61,7 +61,9 @@ class WanVAE_tiny(nn.Module):
                 self.shift = self.shift.to(device=latents.device, dtype=latents.dtype)
                 self.scale = self.scale.to(device=latents.device, dtype=latents.dtype)
 
-            latents = latents * self.scale + self.shift
+            # Denormalize: z = z_norm * std + mean
+            # self.scale stores 1/std. So z = z_norm / self.scale + self.shift
+            latents = latents / self.scale + self.shift
 
         # Decode
         # TAEHV expects NTCHW. Transpose BCTHW -> BTCHW
