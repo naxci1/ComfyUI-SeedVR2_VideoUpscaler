@@ -112,8 +112,8 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
                         pass
                     else:
                         # pool mem is ready, run the pool block
-                        N, C, H, W = xt.shape
-                        xt = b(torch.cat(mem[i], 1).view(N * b.stride, C, H, W))
+                        # Note: TPool expects concatenated channels (C * stride), so we do NOT view/reshape back to batch/time.
+                        xt = b(torch.cat(mem[i], 1))
                         # reset the pool mem
                         mem[i] = []
                         # add successor to work queue
