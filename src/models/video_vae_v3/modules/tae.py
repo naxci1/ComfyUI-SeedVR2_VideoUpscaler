@@ -120,9 +120,10 @@ def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
                         work_queue.insert(0, TWorkItem(xt, i + 1))
                 elif isinstance(b, TGrow):
                     xt = b(xt)
-                    NT, C, H, W = xt.shape
-                    # each tgrow has multiple successor nodes
-                    for xt_next in reversed(xt.view(N, b.stride * C, H, W).chunk(b.stride, 1)):
+                    # Split channels into stride frames.
+                    # xt is [N, C_out, H, W] where C_out = C_in * stride.
+                    # chunk(stride, 1) gives 'stride' tensors of [N, C_in, H, W].
+                    for xt_next in reversed(xt.chunk(b.stride, 1)):
                         # add successor to work queue
                         work_queue.insert(0, TWorkItem(xt_next, i + 1))
                 else:
