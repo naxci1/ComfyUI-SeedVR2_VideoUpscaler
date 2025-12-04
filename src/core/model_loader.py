@@ -752,53 +752,84 @@ def _report_parameter_mismatches(state: Dict[str, torch.Tensor],
 
 
 def initialize_meta_buffers(model: torch.nn.Module, target_device: torch.device, debug: Optional['Debug'] = None) -> None:
-    """Initialize meta buffers with timing."""
+    """Initialize meta buffers and parameters with timing."""
     debug.start_timer("buffer_init")
     initialized = initialize_meta_buffers_impl(model, target_device, debug)
     if initialized > 0:
-        debug.log(f"Initialized {initialized} non-persistent buffers", category="success")
-    debug.end_timer("buffer_init", "Buffer initialization")
+        debug.log(f"Initialized {initialized} non-persistent buffers/parameters", category="success")
+    debug.end_timer("buffer_init", "Meta initialization")
 
 
 def initialize_meta_buffers_impl(model: torch.nn.Module, target_device: torch.device, debug: Optional['Debug'] = None) -> int:
     """
-    Initialize any buffers still on meta device after materialization.
+    Initialize any buffers OR parameters still on meta device after materialization.
     
-    Non-persistent buffers aren't included in state_dict and remain on meta
-    device after load_state_dict. This function moves them to the target device.
+    This ensures the model is fully materialized and safe to move between devices.
+    Any remaining meta tensors will cause runtime errors during .to() operations.
     
     Args:
-        model: Model potentially containing meta device buffers
+        model: Model potentially containing meta device tensors
         target_device: Target device for initialization (torch.device object)
         debug: Debug instance for logging
         
     Returns:
-        Number of buffers initialized
+        Number of tensors initialized
     """
     initialized_count = 0
     
-    # Simply initialize all meta device buffers to zeros on target device
+    # 1. Initialize Buffers
     for name, buffer in model.named_buffers():
         if buffer is not None and buffer.device.type == 'meta':
-            # Get the module that owns this buffer
-            module_path = name.rsplit('.', 1)[0] if '.' in name else ''
-            buffer_name = name.rsplit('.', 1)[1] if '.' in name else name
-            
-            # Get the actual module
-            if module_path:
-                module = model
-                for part in module_path.split('.'):
-                    module = getattr(module, part)
-            else:
-                module = model
-            
-            # Create a zero tensor of the same shape on target device
-            # This is safe for all non-persistent buffers (caches, dummy tensors, etc.)
-            initialized_buffer = torch.zeros_like(buffer, device=target_device)
-            module.register_buffer(buffer_name, initialized_buffer, persistent=False)
+            _materialize_tensor(model, name, buffer, target_device, is_buffer=True)
             initialized_count += 1
-    
+
+    # 2. Initialize Parameters (critical for missing checkpoint keys)
+    for name, param in model.named_parameters():
+        if param is not None and param.device.type == 'meta':
+            if debug:
+                debug.log(f"Initializing missing parameter {name} from meta to {target_device}",
+                         level="WARNING", category="loader")
+            _materialize_tensor(model, name, param, target_device, is_buffer=False)
+            initialized_count += 1
+            
     return initialized_count
+
+
+def _materialize_tensor(model: torch.nn.Module, name: str, meta_tensor: torch.Tensor,
+                       target_device: torch.device, is_buffer: bool) -> None:
+    """Helper to materialize a single meta tensor on the target device."""
+    # Get the module that owns this tensor
+    module_path = name.rsplit('.', 1)[0] if '.' in name else ''
+    attr_name = name.rsplit('.', 1)[1] if '.' in name else name
+
+    if module_path:
+        module = model
+        for part in module_path.split('.'):
+            module = getattr(module, part)
+    else:
+        module = model
+
+    # Create concrete tensor
+    if is_buffer:
+        # Buffers are usually zero-initialized
+        new_tensor = torch.zeros(meta_tensor.shape, device=target_device, dtype=meta_tensor.dtype)
+        module.register_buffer(attr_name, new_tensor, persistent=False)
+    else:
+        # Parameters need appropriate initialization
+        new_data = torch.empty(meta_tensor.shape, device=target_device, dtype=meta_tensor.dtype)
+
+        # Simple heuristic for initialization
+        if 'bias' in attr_name:
+            torch.nn.init.zeros_(new_data)
+        elif 'weight' in attr_name:
+            if len(new_data.shape) >= 2:
+                torch.nn.init.kaiming_normal_(new_data)
+            else:
+                torch.nn.init.normal_(new_data)
+        else:
+            torch.nn.init.normal_(new_data)
+            
+        setattr(module, attr_name, torch.nn.Parameter(new_data))
 
 
 def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor], 
@@ -806,6 +837,30 @@ def _load_standard_weights(model: torch.nn.Module, state: Dict[str, torch.Tensor
                           debug: Optional['Debug'] = None) -> torch.nn.Module:
     """Load standard (non-GGUF) weights into model."""
     debug.start_timer(f"{model_type_lower}_state_apply")
+
+    # Prefix handling: Check if checkpoint has 'model.' prefix but target model doesn't expect it
+    # This handles the case where checkpoint is saved from a wrapper class (like WanVAE)
+    # but we are loading into the inner model (WanVAE_)
+
+    # Sample a few keys to detect prefix
+    sample_keys = list(state.keys())[:5]
+    has_model_prefix = all(k.startswith('model.') for k in sample_keys) if sample_keys else False
+
+    if has_model_prefix:
+        # Check if model expects 'model.' prefix (by checking named_parameters)
+        model_sample_keys = [k for k, _ in list(model.named_parameters())[:5]]
+        model_expects_prefix = all(k.startswith('model.') for k in model_sample_keys) if model_sample_keys else False
+
+        if not model_expects_prefix:
+            if debug:
+                debug.log(f"Detected 'model.' prefix in checkpoint but not in model. Stripping prefix...",
+                         category=model_type_lower)
+            # Create new state dict with stripped prefix
+            new_state = {k[6:]: v for k, v in state.items() if k.startswith('model.')}
+            # Keep non-prefixed keys just in case? Usually mixing is rare.
+            # Let's stick to safe prefix stripping.
+            state = new_state
+
     model.load_state_dict(state, strict=False, assign=True)
     
     action = "materialized" if used_meta else "applied"

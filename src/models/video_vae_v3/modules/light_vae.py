@@ -47,11 +47,15 @@ class RMS_norm(nn.Module):
 
         self.channel_first = channel_first
         self.scale = dim**0.5
-        self.gamma = nn.Parameter(torch.ones(shape))
+        # Standardize parameter name to 'weight' for compatibility with most checkpoints
+        self.weight = nn.Parameter(torch.ones(shape))
         self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
 
     def forward(self, x):
-        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
+        # Ensure weight is on correct device if somehow missed (unlikely if loaded correctly)
+        # But if we are on meta, and this wasn't loaded, it will crash.
+        # We assume load_state_dict(assign=True) is used.
+        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.weight + self.bias
 
 
 class Upsample(nn.Upsample):
@@ -771,11 +775,31 @@ class LightVAEWrapper(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
+    def _ensure_buffers(self, target_device):
+        """
+        Ensure buffers (shift/scale) are materialized on the target device.
+        This fixes the issue where they remain on 'meta' device if created
+        under a meta context and not loaded from state dict.
+        """
+        if self.shift.device.type == 'meta':
+            self.shift = torch.tensor(self.mean, device=target_device, dtype=self.dtype).view(1, 16, 1, 1, 1)
+        if self.scale.device.type == 'meta':
+             self.scale = 1.0 / torch.tensor(self.std, device=target_device, dtype=self.dtype).view(1, 16, 1, 1, 1)
+
     def encode(self, x: torch.FloatTensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> CausalEncoderOutput:
 
         # x input: [B, C, T, H, W]
         # model expects [B, C, T, H, W]
+
+        # Ensure buffers are real
+        self._ensure_buffers(x.device)
+
+        # Ensure they are on correct device (if materialized on CPU but needed on CUDA)
+        if self.shift.device != x.device:
+            self.shift = self.shift.to(x.device)
+        if self.scale.device != x.device:
+            self.scale = self.scale.to(x.device)
 
         if tiled:
             # Update tile settings if provided
@@ -808,6 +832,15 @@ class LightVAEWrapper(nn.Module):
 
     def decode(self, z: torch.Tensor, return_dict: bool = True, tiled: bool = False,
                tile_size: Tuple[int, int] = (512, 512), tile_overlap: Tuple[int, int] = (64, 64)) -> Union[DecoderOutput, torch.Tensor]:
+
+        # Ensure buffers are real
+        self._ensure_buffers(z.device)
+
+        # Ensure they are on correct device
+        if self.shift.device != z.device:
+            self.shift = self.shift.to(z.device)
+        if self.scale.device != z.device:
+            self.scale = self.scale.to(z.device)
 
         if tiled:
             self.model.tile_sample_min_height = tile_size[0]
